@@ -1,0 +1,102 @@
+#include <TFT_eSPI.h>
+#include <Wire.h>
+
+#define TOUCH_ADDR 0x38
+#define TOUCH_RST 6
+
+#define LED_PIN 7   // 🔥 LED output pin
+
+TFT_eSPI tft = TFT_eSPI();
+
+// Screen is 480x320 in rotation 1
+#define BTN_W 140
+#define BTN_H 70
+#define BTN_X ((480 - BTN_W) / 2)
+#define BTN_Y ((320 - BTN_H) / 2)
+
+bool buttonPressed = false;
+bool ledState = false;   // OFF initially
+
+void drawButton() {
+  if (ledState) {
+    tft.fillRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_GREEN);
+    tft.setTextColor(TFT_BLACK);
+    tft.drawString("ON", BTN_X + 45, BTN_Y + 25);
+  } else {
+    tft.fillRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_BLUE);
+    tft.setTextColor(TFT_WHITE);
+    tft.drawString("OFF", BTN_X + 35, BTN_Y + 25);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(10, OUTPUT);
+  digitalWrite(10, HIGH);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  pinMode(TOUCH_RST, OUTPUT);
+  digitalWrite(TOUCH_RST, LOW);
+  delay(10);
+  digitalWrite(TOUCH_RST, HIGH);
+  delay(200);
+
+  Wire.begin();
+
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextFont(2);
+
+  drawButton();
+}
+
+void loop() {
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(0x02);
+  Wire.endTransmission();
+  Wire.requestFrom(TOUCH_ADDR, 1);
+
+  if (Wire.available()) {
+    uint8_t touches = Wire.read();
+
+    if (touches > 0) {
+      Wire.beginTransmission(TOUCH_ADDR);
+      Wire.write(0x03);
+      Wire.endTransmission();
+      Wire.requestFrom(TOUCH_ADDR, 4);
+
+      if (Wire.available() == 4) {
+        uint16_t x = ((Wire.read() & 0x0F) << 8) | Wire.read();
+        uint16_t y = ((Wire.read() & 0x0F) << 8) | Wire.read();
+
+        // Correct mapping
+        uint16_t tx = y;
+        uint16_t ty = 320 - x;
+
+        if (tx > BTN_X && tx < BTN_X + BTN_W &&
+            ty > BTN_Y && ty < BTN_Y + BTN_H) {
+
+          if (!buttonPressed) {
+            buttonPressed = true;
+
+            // 🔥 TOGGLE LED
+            ledState = !ledState;
+            digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+
+            Serial.println(ledState ? "LED ON" : "LED OFF");
+
+            drawButton();
+          }
+        }
+      }
+    } else {
+      buttonPressed = false;
+    }
+  }
+
+  delay(50);
+}
