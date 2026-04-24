@@ -1,0 +1,69 @@
+// ================= BMS SIMULATOR (UNO) =================
+// Uses hardware Serial (pins 0/1) to communicate with Mega
+
+int soc = 50;          // Start SOC at 50%
+int targetSOC = 30;    // Default target
+bool discharging = false;
+
+// Timing for SOC drop
+unsigned long lastDrop = 0;
+const unsigned long dropInterval = 5000; // 5 seconds per 1% drop
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+
+  delay(2000); // Allow Mega time to start
+
+  Serial.println("SOC:50");
+  Serial.println("STATUS:STOPPED");
+}
+
+// ================= HANDLE COMMANDS =================
+void handleCommand(String cmd) {
+  cmd.trim();
+
+  if (cmd.startsWith("SET:")) {
+    targetSOC = cmd.substring(4).toInt();
+  }
+
+  else if (cmd == "START") {
+    discharging = true;
+    Serial.println("STATUS:RUNNING");
+  }
+
+  else if (cmd == "STOP") {
+    discharging = false;
+    Serial.println("STATUS:STOPPED");
+  }
+
+  else if (cmd == "REQ") {
+    Serial.println("SOC:" + String(soc));
+  }
+}
+
+// ================= LOOP =================
+void loop() {
+
+  // Read commands from Mega
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    handleCommand(cmd);
+  }
+
+  // Simulate discharge
+  if (discharging && millis() - lastDrop >= dropInterval) {
+    lastDrop = millis();
+
+    if (soc > targetSOC) {
+      soc--;
+      Serial.println("SOC:" + String(soc));
+    }
+
+    if (soc <= targetSOC) {
+      discharging = false;
+      Serial.println("DONE");
+      Serial.println("STATUS:STOPPED");
+    }
+  }
+}
