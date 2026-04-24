@@ -1,0 +1,391 @@
+#include <TFT_eSPI.h>
+#include <Wire.h>
+
+// ================= TOUCH =================
+#define TOUCH_ADDR 0x38
+#define TOUCH_RST 6
+
+// ================= RELAY =================
+#define RELAY_PIN 7
+
+// ================= COLORS =================
+#define LIGHT_BLUE 0x5D9B
+
+TFT_eSPI tft = TFT_eSPI();
+
+// ================= STATES =================
+enum Screen {
+  MENU,
+  SET_SCREEN,
+  SELECT_SOC,
+  CONFIRM,
+  DISCHARGING,
+  CANCEL_CONFIRM,
+  CANCELED,
+  FINISHED
+};
+
+Screen currentScreen = MENU;
+Screen lastScreen = (Screen)-1;
+
+// ================= VARIABLES =================
+int tens = 3;
+int ones = 0;
+int targetSOC = 30;
+
+// ================= BMS VARIABLES =================
+int currentSOC = -1;           // SOC from Uno
+String bmsStatus = "UNKNOWN";
+
+bool touchHeld = false;
+bool isDischarging = false;
+
+// ================= TOUCH =================
+unsigned long lastTouchRead = 0;
+const int touchInterval = 30;
+
+// ================= COMM TIMING =================
+unsigned long lastRequest = 0;
+const unsigned long requestInterval = 500;
+
+// ================= TEXT =================
+void drawCenteredText(String text, int x, int y, int size, uint16_t color) {
+  tft.setTextSize(size);
+  tft.setTextColor(color, TFT_BLACK);
+  int w = text.length() * 6 * size;
+  int h = 8 * size;
+  tft.setCursor(x - w / 2, y - h / 2);
+  tft.print(text);
+}
+
+// ================= BUTTON =================
+void drawButton(int x, int y, int w, int h, String label, uint16_t color) {
+  tft.fillRoundRect(x, y, w, h, 10, color);
+  tft.drawRoundRect(x, y, w, h, 10, TFT_WHITE);
+  drawCenteredText(label, x + w/2, y + h/2, 2, TFT_BLACK);
+}
+
+// ================= STATUS DISPLAY =================
+void updateStatusDisplay() {
+  tft.fillRect(100, 170, 280, 80, TFT_BLACK);
+
+  if (isDischarging)
+    drawCenteredText("Status: RUNNING", 240, 180, 2, TFT_GREEN);
+  else
+    drawCenteredText("Status: STOPPED", 240, 180, 2, TFT_RED);
+
+  if (currentSOC >= 0)
+    drawCenteredText("Current SOC: " + String(currentSOC) + "%", 240, 215, 2, TFT_WHITE);
+  else
+    drawCenteredText("Current SOC: --", 240, 215, 2, TFT_WHITE);
+}
+
+// ================= SOC SELECT DISPLAY =================
+void updateSOCSelectionDisplay() {
+  int centerX = 240;
+  int offset = 70;
+  int leftX = centerX - offset;
+  int rightX = centerX + offset;
+
+  tft.fillRect(leftX - 30, 110, 60, 80, TFT_BLACK);
+  tft.fillRect(rightX - 30, 110, 60, 80, TFT_BLACK);
+
+  drawCenteredText(String(tens), leftX, 150, 3, TFT_WHITE);
+  drawCenteredText(String(ones), rightX, 150, 3, TFT_WHITE);
+}
+
+// ================= SERIAL COMM =================
+
+// Send command to Uno
+void sendCommand(String cmd) {
+  Serial1.println(cmd);
+}
+
+// Read incoming data from Uno
+void readBMS() {
+  while (Serial1.available()) {
+    String msg = Serial1.readStringUntil('\n');
+    msg.trim();
+
+    // -------- SOC UPDATE --------
+    if (msg.startsWith("SOC:")) {
+      currentSOC = msg.substring(4).toInt();
+
+      if (currentScreen == DISCHARGING) {
+        updateStatusDisplay();
+      }
+
+      // -------- FAILSAFE STOP --------
+      if (isDischarging && currentSOC <= targetSOC) {
+        digitalWrite(RELAY_PIN, LOW);
+        isDischarging = false;
+        currentScreen = FINISHED;
+      }
+    }
+
+    // -------- STATUS UPDATE --------
+    else if (msg.startsWith("STATUS:")) {
+      bmsStatus = msg.substring(7);
+    }
+
+    // -------- DONE MESSAGE --------
+    else if (msg == "DONE") {
+      digitalWrite(RELAY_PIN, LOW);
+      isDischarging = false;
+      currentScreen = FINISHED;
+    }
+  }
+}
+
+// ================= TOUCH =================
+bool getTouch(uint16_t &tx, uint16_t &ty) {
+
+  if (millis() - lastTouchRead < touchInterval) return false;
+  lastTouchRead = millis();
+
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(0x02);
+  if (Wire.endTransmission() != 0) return false;
+
+  if (Wire.requestFrom(TOUCH_ADDR, 1) != 1) return false;
+  if (!Wire.available() || Wire.read() == 0) return false;
+
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(0x03);
+  if (Wire.endTransmission() != 0) return false;
+
+  if (Wire.requestFrom(TOUCH_ADDR, 4) != 4) return false;
+  if (Wire.available() < 4) return false;
+
+  uint16_t x = ((Wire.read() & 0x0F) << 8) | Wire.read();
+  uint16_t y = ((Wire.read() & 0x0F) << 8) | Wire.read();
+
+  tx = y;
+  ty = 320 - x;
+
+  return true;
+}
+
+// ================= DRAW SCREENS =================
+void drawMenu() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("MAIN MENU", 240, 30, 3, TFT_CYAN);
+  drawButton(140, 120, 200, 60, "DISCHARGE", TFT_GREEN);
+}
+
+void drawSetScreen() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("SET TARGET SOC", 240, 30, 3, TFT_CYAN);
+  drawCenteredText("Target: " + String(targetSOC) + "%", 240, 120, 3, TFT_WHITE);
+
+  drawButton(140, 180, 200, 50, "SELECT VALUE", LIGHT_BLUE);
+  drawButton(40, 260, 140, 40, "BACK", TFT_RED);
+  drawButton(300, 260, 140, 40, "START", TFT_GREEN);
+}
+
+void drawSelectSOC() {
+  tft.fillScreen(TFT_BLACK);
+
+  int centerX = 240;
+  int offset = 70;
+  int leftX = centerX - offset;
+  int rightX = centerX + offset;
+
+  drawCenteredText("SET SOC", centerX, 20, 3, TFT_CYAN);
+
+  drawCenteredText("+", leftX, 60, 3, TFT_WHITE);
+  drawCenteredText("-", leftX, 240, 3, TFT_WHITE);
+  drawCenteredText("+", rightX, 60, 3, TFT_WHITE);
+  drawCenteredText("-", rightX, 240, 3, TFT_WHITE);
+
+  drawCenteredText(String(tens), leftX, 150, 3, TFT_WHITE);
+  drawCenteredText(String(ones), rightX, 150, 3, TFT_WHITE);
+
+  drawButton(140, 270, 100, 40, "EXIT", TFT_RED);
+  drawButton(260, 270, 100, 40, "SELECT", TFT_GREEN);
+}
+
+void drawConfirm() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("Discharge to " + String(targetSOC) + "%?", 240, 120, 3, TFT_WHITE);
+
+  drawButton(120, 250, 120, 50, "EXIT", TFT_RED);
+  drawButton(260, 250, 120, 50, "YES", TFT_GREEN);
+}
+
+void drawDischarging() {
+  tft.fillScreen(TFT_BLACK);
+
+  drawCenteredText("DISCHARGING", 240, 40, 3, TFT_GREEN);
+  drawCenteredText("Target: " + String(targetSOC) + "%", 240, 90, 3, TFT_WHITE);
+
+  drawButton(60, 250, 120, 50, "START", TFT_GREEN);
+  drawButton(190, 250, 120, 50, "STOP", TFT_RED);
+  drawButton(320, 250, 120, 50, "EXIT", LIGHT_BLUE);
+
+  updateStatusDisplay();
+}
+
+void drawCancelConfirm() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("Cancel Discharge?", 240, 120, 3, TFT_WHITE);
+
+  drawButton(120, 250, 120, 50, "EXIT", LIGHT_BLUE);
+  drawButton(260, 250, 120, 50, "YES", TFT_RED);
+}
+
+void drawCanceled() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("DISCHARGE CANCELED", 240, 120, 3, TFT_RED);
+  drawButton(140, 250, 200, 50, "MENU", LIGHT_BLUE);
+}
+
+void drawFinished() {
+  tft.fillScreen(TFT_BLACK);
+  drawCenteredText("TARGET REACHED", 240, 120, 3, TFT_GREEN);
+  drawButton(140, 250, 200, 50, "MENU", LIGHT_BLUE);
+}
+
+// ================= HANDLE TOUCH =================
+void handleTouch(uint16_t tx, uint16_t ty) {
+
+  int centerX = 240;
+  int offset = 70;
+  int leftX = centerX - offset;
+  int rightX = centerX + offset;
+
+  switch (currentScreen) {
+
+    case MENU:
+      if (tx > 140 && tx < 340 && ty > 120 && ty < 180)
+        currentScreen = SET_SCREEN;
+      break;
+
+    case SET_SCREEN:
+      if (tx > 140 && tx < 340 && ty > 180 && ty < 230)
+        currentScreen = SELECT_SOC;
+      else if (tx > 300 && tx < 440 && ty > 260)
+        currentScreen = CONFIRM;
+      else if (tx < 140 && ty > 260)
+        currentScreen = MENU;
+      break;
+
+    case SELECT_SOC:
+      if (tx > leftX - 25 && tx < leftX + 25 && ty > 30 && ty < 90 && tens < 9) tens++;
+      else if (tx > leftX - 25 && tx < leftX + 25 && ty > 200 && ty < 260 && tens > 3) tens--;
+      else if (tx > rightX - 25 && tx < rightX + 25 && ty > 30 && ty < 90 && ones < 9) ones++;
+      else if (tx > rightX - 25 && tx < rightX + 25 && ty > 200 && ty < 260 && ones > 0) ones--;
+      else if (ty > 270) currentScreen = SET_SCREEN;
+
+      targetSOC = tens * 10 + ones;
+      updateSOCSelectionDisplay();
+      break;
+
+    case CONFIRM:
+      if (tx > 120 && tx < 240 && ty > 250)
+        currentScreen = SET_SCREEN;
+      else if (tx > 260 && tx < 380 && ty > 250) {
+        sendCommand("SET:" + String(targetSOC));
+        sendCommand("START");
+
+        digitalWrite(RELAY_PIN, HIGH);
+        isDischarging = true;
+        currentScreen = DISCHARGING;
+      }
+      break;
+
+    case DISCHARGING:
+      if (tx > 60 && tx < 180 && ty > 250) {
+        sendCommand("START");
+        digitalWrite(RELAY_PIN, HIGH);
+        isDischarging = true;
+        updateStatusDisplay();
+      }
+      else if (tx > 190 && tx < 310 && ty > 250) {
+        sendCommand("STOP");
+        digitalWrite(RELAY_PIN, LOW);
+        isDischarging = false;
+        updateStatusDisplay();
+      }
+      else if (tx > 320 && tx < 440 && ty > 250)
+        currentScreen = CANCEL_CONFIRM;
+      break;
+
+    case CANCEL_CONFIRM:
+      if (tx > 120 && tx < 240 && ty > 250)
+        currentScreen = DISCHARGING;
+      else if (tx > 260 && tx < 380 && ty > 250) {
+        sendCommand("STOP");
+        digitalWrite(RELAY_PIN, LOW);
+        isDischarging = false;
+        currentScreen = CANCELED;
+      }
+      break;
+
+    case CANCELED:
+    case FINISHED:
+      currentScreen = MENU;
+      break;
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);   // Debug
+  Serial1.begin(115200);  // Uno communication
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
+  pinMode(TOUCH_RST, OUTPUT);
+  digitalWrite(TOUCH_RST, LOW);
+  delay(10);
+  digitalWrite(TOUCH_RST, HIGH);
+
+  Wire.begin();
+
+  tft.init();
+  tft.setRotation(1);
+}
+
+// ================= LOOP =================
+void loop() {
+
+  // Screen updates
+  if (currentScreen != lastScreen) {
+    lastScreen = currentScreen;
+
+    switch (currentScreen) {
+      case MENU: drawMenu(); break;
+      case SET_SCREEN: drawSetScreen(); break;
+      case SELECT_SOC: drawSelectSOC(); break;
+      case CONFIRM: drawConfirm(); break;
+      case DISCHARGING: drawDischarging(); break;
+      case CANCEL_CONFIRM: drawCancelConfirm(); break;
+      case CANCELED: drawCanceled(); break;
+      case FINISHED: drawFinished(); break;
+    }
+  }
+
+  // Read BMS data
+  readBMS();
+
+  // Request SOC periodically
+  if (millis() - lastRequest > requestInterval) {
+    sendCommand("REQ");
+    lastRequest = millis();
+  }
+
+  // Touch handling
+  uint16_t tx, ty;
+  bool touched = getTouch(tx, ty);
+
+  if (touched && !touchHeld) {
+    touchHeld = true;
+    handleTouch(tx, ty);
+  } else if (!touched) {
+    touchHeld = false;
+  }
+
+  delay(10);
+}
